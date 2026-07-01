@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 data/rate_limits.json
 .DS_Store
+repomix-output.xml
