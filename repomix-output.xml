@@ -1,0 +1,972 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+core/
+  __init__.py
+  chunking.py
+  cleaner.py
+  parsing.py
+  security.py
+data/
+  rate_limits.json
+.gitignore
+app.py
+requirements.txt
+sample.md
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="core/__init__.py">
+from .parsing import extract_text_from_file
+from .cleaner import run_ai_cleaning_pipeline
+from .chunking import chunk_markdown_text
+from .security import check_and_update_quotas
+
+__all__ = [
+    "extract_text_from_file",
+    "run_ai_cleaning_pipeline",
+    "chunk_markdown_text",
+    "check_and_update_quotas",
+]
+</file>
+
+<file path="core/chunking.py">
+import re
+import string
+from typing import List, Dict, Any
+
+# Compile pattern to match prepended [Context: ...] context tag prefixes
+CONTEXT_PREFIX_RE = re.compile(r'^\[Context:[^\]]*\]\n?', re.IGNORECASE)
+
+def deduplicate_chunks(chunks: List[Dict[str, Any]], similarity_threshold: float = 0.75) -> List[Dict[str, Any]]:
+    """
+    Deduplicates content-redundant chunks using Jaccard Similarity (word intersection over union),
+    preserving the chunk with the deepest/longest hierarchical header_path context.
+    
+    Args:
+        chunks: List of generated chunks.
+        similarity_threshold: Jaccard overlap threshold to flag duplicates.
+        
+    Returns:
+        List[Dict[str, Any]]: Deduplicated list of chunks.
+    """
+    clean_chunks = []
+    
+    for chk in chunks:
+        # Strip context prefix block to compare raw contents
+        raw_chk = CONTEXT_PREFIX_RE.sub('', chk["content"])
+        # Replace punctuation characters with whitespace
+        cleaned_chk = "".join(c if c not in string.punctuation else " " for c in raw_chk)
+        words_chk = set(cleaned_chk.lower().split())
+        is_duplicate = False
+        
+        for saved_chk in clean_chunks:
+            raw_saved = CONTEXT_PREFIX_RE.sub('', saved_chk["content"])
+            cleaned_saved = "".join(c if c not in string.punctuation else " " for c in raw_saved)
+            words_saved = set(cleaned_saved.lower().split())
+            
+            # Compute semantic Jaccard similarity
+            intersection = words_chk.intersection(words_saved)
+            union = words_chk.union(words_saved)
+            similarity = len(intersection) / len(union) if union else 0.0
+            
+            if similarity > similarity_threshold:
+                is_duplicate = True
+                # Favor the deepest, most nested header path
+                if len(chk["header_path"]) > len(saved_chk["header_path"]):
+                    saved_chk["content"] = chk["content"]
+                    saved_chk["header_path"] = chk["header_path"]
+                    saved_chk["header"] = chk["header"]
+                    saved_chk["word_count"] = chk["word_count"]
+                    saved_chk["char_count"] = chk["char_count"]
+                break
+                
+        if not is_duplicate:
+            clean_chunks.append(chk)
+            
+    return clean_chunks
+
+# Compile regex to target horizontal rulers (---) or dangling hyphens on standalone lines
+CLEAN_PATTERN = re.compile(r'^\s*(?:-{3,}|-)\s*$', re.MULTILINE)
+
+def chunk_markdown_text(cleaned_text: str) -> List[Dict[str, Any]]:
+    """
+    Chunks markdown text semantically based on header hierarchy (# to ######).
+    
+    Args:
+        cleaned_text (str): Cleaned markdown text.
+        
+    Returns:
+        List[Dict[str, Any]]: List of semantic chunks containing text and metadata.
+    """
+    chunks = []
+    lines = cleaned_text.splitlines()
+    
+    # Track hierarchy: level -> header name
+    current_headers = {1: None, 2: None, 3: None, 4: None, 5: None, 6: None}
+    current_chunk_lines = []
+    
+    def save_chunk(headers_dict, text_lines):
+        text_content = "\n".join(text_lines).strip()
+        if not text_content:
+            return
+            
+        # Strip formatting artifacts (rulers, dangling hyphens, and extreme padding)
+        cleaned_content = CLEAN_PATTERN.sub('', text_content).strip()
+        if not cleaned_content:
+            return
+            
+        # Create a breadcrumb-style header path (e.g. "Root > Section > Subsection")
+        path_parts = []
+        for level in sorted(headers_dict.keys()):
+            h = headers_dict[level]
+            if h:
+                path_parts.append(h)
+                
+        header_path = " > ".join(path_parts) if path_parts else "Document Root"
+        header_text = path_parts[-1] if path_parts else "Root"
+        
+        # Architectural safety filter to ignore textbook indexes and bibliographies
+        ignored_terms = ["subject index", "index", "bibliography", "references"]
+        header_path_lower = header_path.lower()
+        header_text_lower = header_text.lower()
+        if any(term in header_path_lower or term in header_text_lower for term in ignored_terms):
+            return
+            
+        # Prepend context path directly to chunk body
+        injected_content = f"[Context: {header_path}]\n{cleaned_content}"
+        
+        chunks.append({
+            "header": header_text,
+            "header_path": header_path,
+            "content": injected_content,
+            "word_count": len(injected_content.split()),
+            "char_count": len(injected_content)
+        })
+
+    for line in lines:
+        # Check if line is a markdown header
+        match = re.match(r'^(#{1,6})\s+(.+)$', line)
+        if match:
+            # Save preceding chunk
+            save_chunk(current_headers, current_chunk_lines)
+            current_chunk_lines = []
+            
+            # Parse level and text
+            level = len(match.group(1))
+            header_text = match.group(2).strip()
+            
+            # Update current level and reset all lower hierarchy levels
+            current_headers[level] = header_text
+            for l in range(level + 1, 7):
+                current_headers[l] = None
+        else:
+            current_chunk_lines.append(line)
+            
+    # Save the final chunk remaining
+    save_chunk(current_headers, current_chunk_lines)
+    
+    # Fallback if no markdown headers were detected
+    if not chunks and cleaned_text.strip():
+        cleaned_content = CLEAN_PATTERN.sub('', cleaned_text).strip()
+        if cleaned_content:
+            header_path = "Document Root"
+            injected_content = f"[Context: {header_path}]\n{cleaned_content}"
+            chunks.append({
+                "header": "Root",
+                "header_path": header_path,
+                "content": injected_content,
+                "word_count": len(injected_content.split()),
+                "char_count": len(injected_content)
+            })
+        
+    return deduplicate_chunks(chunks)
+</file>
+
+<file path="core/cleaner.py">
+import time
+import json
+from typing import List, Callable, Optional
+from pydantic import BaseModel
+from google.genai import types
+
+class CleanedTopic(BaseModel):
+    title: str
+    hierarchy_path: str
+    sanitized_content: str  # Clean content without noise
+
+class DocumentCleanPayload(BaseModel):
+    topics: List[CleanedTopic]
+
+def split_raw_text_into_large_blocks(text: str, block_size: int = 25000, overlap: int = 2500) -> List[str]:
+    """
+    Splits raw text into overlapping segments to prevent LLM context and output window saturation.
+    
+    Args:
+        text: The source string.
+        block_size: Character size of each chunk.
+        overlap: Character size of overlap between chunks.
+        
+    Returns:
+        List[str]: The split string blocks.
+    """
+    if not text:
+        return []
+    if len(text) <= block_size:
+        return [text]
+        
+    blocks = []
+    start = 0
+    text_len = len(text)
+    
+    while start < text_len:
+        end = start + block_size
+        block = text[start:end]
+        blocks.append(block)
+        
+        # Advance by size minus overlap
+        start += (block_size - overlap)
+        
+        # Guard against zero/negative step size
+        if block_size <= overlap:
+            break
+            
+    return blocks
+
+def call_llm_cleaner_api(text_block: str, client, model_name: str) -> str:
+    """
+    Executes a content generation request to the Gemini API to clean document noise,
+    forcing structured JSON schema execution.
+    
+    Args:
+        text_block: Raw chunk of text.
+        client: google.genai.Client instance.
+        model_name: Name of target model.
+        
+    Returns:
+        str: Cleaned Markdown content reconstructed from structured JSON.
+    """
+    system_instruction = (
+        "You are an expert Knowledge Engineer.\n"
+        "Your task is to clean and optimize raw text extracted from documents for ingestion into a RAG system.\n\n"
+        "Please process the input text according to these strict rules:\n"
+        "1. Identify the logical topics in the text block.\n"
+        "2. For each topic, extract a descriptive title and determine its hierarchy_path (e.g. 'Main Section > Sub Section').\n"
+        "3. Remove all conversational filler, chatty preambles, introductory welcoming text, repetitive examples, "
+        "licensing boilerplate, page headers, footers, and meta-commentary.\n"
+        "4. Retain 100% of the raw, granular conceptual rules, specifications, laws, formulas, criteria, definitions, "
+        "and precise technical details.\n"
+        "5. STOP CONDITION: If the text segment consists of a literal keyword index, subject index, glossary list, or bibliography, output nothing or skip the processing of this block entirely. Do not format indices into markdown chunks.\n"
+        "6. Output clean, raw content inside sanitized_content. Do not summarize or lose critical information. "
+        "Do not create high-level summary blocks or meta-recaps (e.g., 'Overview' or 'General Best Practices') if the specific technical details and sub-sections are already detailed downstream in the text. Prioritize splitting the document into atomic, standalone concepts."
+    )
+    
+    try:
+        response = client.models.generate_content(
+            model=model_name,
+            contents=text_block,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.1,
+                response_mime_type="application/json",
+                response_schema=DocumentCleanPayload
+            )
+        )
+        if not response.text:
+            raise ValueError("Gemini API returned an empty response.")
+            
+        data = json.loads(response.text)
+        markdown_parts = []
+        for topic in data.get("topics", []):
+            title = topic.get("title", "").strip()
+            path = topic.get("hierarchy_path", "").strip()
+            content = topic.get("sanitized_content", "").strip()
+            
+            # Determine heading level from path hierarchy depth
+            levels = [p.strip() for p in path.split(">") if p.strip()]
+            depth = len(levels)
+            if depth == 0 and title:
+                depth = 1
+            heading_prefix = "#" * max(1, min(6, depth))
+            
+            topic_md = []
+            if title:
+                topic_md.append(f"{heading_prefix} {title}")
+            if content:
+                topic_md.append(content)
+                
+            if topic_md:
+                markdown_parts.append("\n\n".join(topic_md))
+                
+        return "\n\n".join(markdown_parts)
+    except Exception as e:
+        raise RuntimeError(f"Gemini API request failed: {str(e)}")
+
+def run_ai_cleaning_pipeline(
+    raw_text: str, 
+    client, 
+    model_name: str, 
+    progress_callback: Optional[Callable[[int, int], None]] = None
+) -> str:
+    """
+    Coordinates chunking, API execution, pacing, and assembly of cleaned output text.
+    
+    Args:
+        raw_text: Full raw text from the parsed document.
+        client: google.genai.Client instance.
+        model_name: Selected Gemini model.
+        progress_callback: Optional function invoked with (current_block, total_blocks) for UI updates.
+        
+    Returns:
+        str: Reassembled, cleaned Markdown.
+    """
+    blocks = split_raw_text_into_large_blocks(raw_text)
+    total_blocks = len(blocks)
+    cleaned_blocks = []
+    
+    for idx, block in enumerate(blocks):
+        if progress_callback:
+            progress_callback(idx + 1, total_blocks)
+            
+        cleaned_block = call_llm_cleaner_api(block, client, model_name)
+        cleaned_blocks.append(cleaned_block)
+            
+    return "\n\n".join(cleaned_blocks)
+</file>
+
+<file path="core/parsing.py">
+import os
+import fitz  # PyMuPDF
+
+def extract_text_from_file(file) -> str:
+    """
+    Extracts raw text from an uploaded file based on its extension.
+    Supports PDF, MD, TXT, DOCX, PPTX, CSV, and XLSX.
+    
+    Args:
+        file: A file-like object from st.file_uploader.
+        
+    Returns:
+        str: The extracted raw text, structured appropriately.
+        
+    Raises:
+        ValueError: If the file type is unsupported or parsing fails.
+        Exception: For any errors during parsing.
+    """
+    filename = file.name
+    _, ext = os.path.splitext(filename.lower())
+    
+    if ext in [".md", ".txt"]:
+        try:
+            content = file.read()
+            if isinstance(content, bytes):
+                return content.decode("utf-8")
+            return content
+        except Exception as e:
+            raise Exception(f"Failed to read text file: {str(e)}")
+            
+    elif ext == ".pdf":
+        try:
+            pdf_bytes = file.read()
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            text_parts = []
+            for page_num in range(len(doc)):
+                page = doc.load_page(page_num)
+                text_parts.append(page.get_text())
+            doc.close()
+            extracted_text = "\n".join(text_parts)
+            if not extracted_text.strip():
+                raise ValueError("PDF document contains no selectable text.")
+            return extracted_text
+        except Exception as e:
+            raise Exception(f"Failed to parse PDF document: {str(e)}")
+            
+    elif ext == ".docx":
+        try:
+            import docx
+            doc = docx.Document(file)
+            lines = [p.text for p in doc.paragraphs if p.text.strip()]
+            return "\n\n".join(lines)
+        except Exception as e:
+            raise Exception(f"Failed to parse Word Document (.docx): {str(e)}")
+            
+    elif ext == ".pptx":
+        try:
+            from pptx import Presentation
+            prs = Presentation(file)
+            slides_text = []
+            for idx, slide in enumerate(prs.slides):
+                slide_parts = []
+                for shape in slide.shapes:
+                    if hasattr(shape, "text") and shape.text.strip():
+                        slide_parts.append(shape.text.strip())
+                if slide_parts:
+                    slides_text.append(f"## Slide {idx + 1}\n\n" + "\n".join(slide_parts))
+            return "\n\n".join(slides_text)
+        except Exception as e:
+            raise Exception(f"Failed to parse PowerPoint Presentation (.pptx): {str(e)}")
+            
+    elif ext == ".csv":
+        try:
+            import pandas as pd
+            df = pd.read_csv(file)
+            # Cap data row budget at 5,000 to safe-guard server memory
+            truncated_df = df.head(5000)
+            if truncated_df.empty:
+                return "Empty CSV table."
+            return truncated_df.to_markdown(index=False)
+        except Exception as e:
+            raise Exception(f"Failed to parse CSV file: {str(e)}")
+            
+    elif ext == ".xlsx":
+        try:
+            import pandas as pd
+            df = pd.read_excel(file)
+            # Cap data row budget at 5,000 to safe-guard server memory
+            truncated_df = df.head(5000)
+            if truncated_df.empty:
+                return "Empty Excel table."
+            return truncated_df.to_markdown(index=False)
+        except Exception as e:
+            raise Exception(f"Failed to parse Excel Spreadsheet (.xlsx): {str(e)}")
+            
+    else:
+        raise ValueError(
+            f"Unsupported file type '{ext}'. Supported extensions: .pdf, .md, .txt, .docx, .pptx, .csv, .xlsx"
+        )
+</file>
+
+<file path="core/security.py">
+import os
+import json
+from datetime import datetime, timezone
+from typing import Tuple, Dict, Any
+
+DB_PATH = "data/rate_limits.json"
+USER_LIMIT = 300000
+GLOBAL_LIMIT = 5000000
+
+def _load_limits_db() -> Dict[str, Any]:
+    """
+    Loads raw rates database, resetting counters if UTC calendar day has changed.
+    """
+    current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    default_db = {
+        "date": current_date,
+        "global_consumed": 0,
+        "users": {}
+    }
+    
+    if not os.path.exists(DB_PATH):
+        return default_db
+        
+    try:
+        with open(DB_PATH, "r", encoding="utf-8") as f:
+            db = json.load(f)
+    except Exception:
+        return default_db
+        
+    if db.get("date") != current_date:
+        db = default_db
+        _save_limits_db(db)
+        
+    return db
+
+def _save_limits_db(db: Dict[str, Any]) -> None:
+    """
+    Serializes state atomically to disk using rename replacement to guarantee file integrity.
+    """
+    try:
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        tmp_path = DB_PATH + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(db, f, indent=2)
+        os.replace(tmp_path, DB_PATH)
+    except Exception:
+        pass
+
+def check_and_update_quotas(user_id: str, estimated_tokens: int) -> Tuple[bool, str]:
+    """
+    Validates token transactions against daily personal and global budget bounds.
+    """
+    db = _load_limits_db()
+    
+    global_consumed = db.get("global_consumed", 0)
+    if global_consumed + estimated_tokens > GLOBAL_LIMIT:
+        remaining_global = max(0, GLOBAL_LIMIT - global_consumed)
+        return (
+            False,
+            f"Global Daily Quota Exceeded. Requested: {estimated_tokens:,} tokens, "
+            f"Remaining: {remaining_global:,} tokens (Limit: {GLOBAL_LIMIT:,} tokens/day)."
+        )
+        
+    users = db.setdefault("users", {})
+    user_consumed = users.get(user_id, 0)
+    if user_consumed + estimated_tokens > USER_LIMIT:
+        remaining_user = max(0, USER_LIMIT - user_consumed)
+        return (
+            False,
+            f"Personal Daily Quota Exceeded. Requested: {estimated_tokens:,} tokens, "
+            f"Remaining: {remaining_user:,} tokens (Limit: {USER_LIMIT:,} tokens/day)."
+        )
+        
+    db["global_consumed"] = global_consumed + estimated_tokens
+    db["users"][user_id] = user_consumed + estimated_tokens
+    
+    _save_limits_db(db)
+    return (True, "")
+</file>
+
+<file path="data/rate_limits.json">
+{
+  "date": "2026-07-01",
+  "global_consumed": 3382,
+  "users": {
+    "test_user_id": 19,
+    "local_user_default": 3363
+  }
+}
+</file>
+
+<file path=".gitignore">
+.streamlit/secrets.toml
+</file>
+
+<file path="app.py">
+import streamlit as st
+import json
+import os
+from google import genai
+from core import extract_text_from_file, run_ai_cleaning_pipeline, chunk_markdown_text, check_and_update_quotas
+
+# Set page configuration
+st.set_page_config(
+    page_title="RAG Knowledge Pipeline",
+    page_icon="⚙️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom premium CSS styling injection
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+    
+    /* Apply font styling */
+    html, body, [class*="css"] {
+        font-family: 'Outfit', sans-serif;
+    }
+    
+    /* Premium Title Gradient */
+    .title-gradient {
+        background: linear-gradient(90deg, #3b82f6 0%, #8b5cf6 50%, #ec4899 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-size: 2.75rem;
+        font-weight: 700;
+        margin-bottom: 0.25rem;
+    }
+    
+    /* Stat cards styling */
+    .stat-card {
+        background: rgba(31, 41, 55, 0.4);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 10px;
+        padding: 15px;
+        text-align: center;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    }
+    
+    .stat-val {
+        font-size: 1.8rem;
+        font-weight: 700;
+        color: #3b82f6;
+    }
+    
+    .stat-label {
+        font-size: 0.85rem;
+        color: #9ca3af;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+
+    @media (min-width: 1152px) {
+        .responsive-center-container {
+            max-width: 50% !important;
+            margin: 0 auto !important;
+        }
+    }
+    
+    div[data-testid="stCode"] pre {
+        max-height: 460px !important;
+        overflow-y: auto !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# ----------------- SESSION STATE SETUP -----------------
+if "processed" not in st.session_state:
+    st.session_state.processed = False
+if "raw_text" not in st.session_state:
+    st.session_state.raw_text = ""
+if "cleaned_text" not in st.session_state:
+    st.session_state.cleaned_text = ""
+if "chunks" not in st.session_state:
+    st.session_state.chunks = []
+if "file_hash" not in st.session_state:
+    st.session_state.file_hash = None
+
+# Callback helper to update session state upon manual editor adjustments
+def update_cleaned_content():
+    if "editor" in st.session_state:
+        st.session_state.cleaned_text = st.session_state.editor
+        # Re-run semantic chunking on updated editor text to keep download current
+        st.session_state.chunks = chunk_markdown_text(st.session_state.editor)
+
+# ----------------- SIDEBAR (METADATA INPUT) -----------------
+st.sidebar.image("https://img.icons8.com/nolan/96/processing-threads.png", width=64)
+st.sidebar.markdown("<h2 style='margin-top: 0;'>Pipeline Metadata</h2>", unsafe_allow_html=True)
+
+source_name = st.sidebar.text_input(
+    "Source Document Name", 
+    value="Unlabeled Source",
+    help="Name of the original document or publication source."
+)
+
+custom_tags_raw = st.sidebar.text_input(
+    "Custom Document Tags",
+    value="",
+    placeholder="UX, 2026, Guidelines, E-commerce",
+    help="Flexible, domain-agnostic labels via comma-separated tokens."
+)
+
+# Parse comma-separated tags into a clean list
+custom_tags = [tag.strip() for tag in custom_tags_raw.split(",") if tag.strip()]
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### Gemini API Configuration")
+
+target_model = st.sidebar.selectbox(
+    "Target Model",
+    options=["gemini-3.5-flash", "gemini-3.1-pro"],
+    index=0,
+    help="Select the Gemini model version to power the cleaning agent."
+)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown(
+    """
+    <div style='font-size: 0.8rem; color: #6b7280; text-align: center;'>
+        RAG Knowledge Pipeline v1.0.0<br>
+        Developed by Senior Full-Stack & AI Team
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+# ----------------- MAIN PANEL -----------------
+st.markdown("<h1 class='title-gradient'>RAG Knowledge Pipeline</h1>", unsafe_allow_html=True)
+st.markdown(
+    "<p style='font-size: 1.1rem; color: #9ca3af; margin-bottom: 2rem;'>Intelligent ETL utility for parsing, optimizing, and chunking knowledge documents for Vector Database ingestion.</p>",
+    unsafe_allow_html=True
+)
+
+# Visual placeholder card indicating AI Cleaning Pipeline status
+st.markdown("""
+<div style="background: linear-gradient(135deg, rgba(59, 130, 246, 0.08) 0%, rgba(139, 92, 246, 0.08) 100%);
+            border: 1px solid rgba(59, 130, 246, 0.2);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 25px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);">
+    <div style="display: flex; align-items: center; gap: 10px;">
+        <span style="background-color: #059669; color: white; padding: 4px 10px; border-radius: 9999px; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; display: inline-flex; align-items: center; gap: 6px;">
+            <span style="width: 6px; height: 6px; background-color: #34d399; border-radius: 50%; display: inline-block; animation: pulse 1.8s infinite;"></span>
+            ACTIVE
+        </span>
+        <h4 style="margin: 0; color: #e5e7eb; font-size: 0.95rem; font-weight: 600;">AI Optimization & Noise Vetting Engine</h4>
+    </div>
+    <p style="margin: 8px 0 0 0; color: #9ca3af; font-size: 0.85rem; line-height: 1.5;">
+        All uploaded files are routed through our active, domain-agnostic LLM cleaning pipeline. This universal noise-filtering agent strips structural headers/footers, metadata noise, formatting inconsistencies, copyright notices, and generic filler text from any document style.
+    </p>
+</div>
+<style>
+@keyframes pulse {
+    0% { transform: scale(0.85); opacity: 1; }
+    50% { transform: scale(1.2); opacity: 0.3; }
+    100% { transform: scale(0.85); opacity: 1; }
+}
+</style>
+""", unsafe_allow_html=True)
+
+# Responsive container start for uploader and CTA button
+st.markdown('<div class="responsive-center-container">', unsafe_allow_html=True)
+
+# Document uploader
+uploaded_file = st.file_uploader(
+    "Upload Source Document", 
+    type=["pdf", "md", "txt", "docx", "pptx", "csv", "xlsx"], 
+    help="Upload PDF, MD, TXT, DOCX, PPTX, CSV, or XLSX source file to initialize ingest sequence."
+)
+
+# Handle file change and reset state appropriately
+if uploaded_file:
+    current_file_id = f"{uploaded_file.name}_{uploaded_file.size}"
+    if st.session_state.file_hash != current_file_id:
+        st.session_state.processed = False
+        st.session_state.raw_text = ""
+        st.session_state.cleaned_text = ""
+        st.session_state.chunks = []
+        st.session_state.file_hash = current_file_id
+else:
+    st.session_state.processed = False
+    st.session_state.raw_text = ""
+    st.session_state.cleaned_text = ""
+    st.session_state.chunks = []
+    st.session_state.file_hash = None
+
+# Action CTA Button and Spinner Container
+st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
+button_placeholder = st.empty()
+spinner_placeholder = st.empty()
+
+# Render button disabled if no file is present
+start_processing = False
+if uploaded_file:
+    start_processing = button_placeholder.button(
+        "Initialize Document Optimization & Chunking", 
+        type="primary",
+        use_container_width=True
+    )
+else:
+    button_placeholder.button(
+        "Upload a document to start", 
+        disabled=True, 
+        use_container_width=True
+    )
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ----------------- PIPELINE EXECUTION -----------------
+if start_processing and uploaded_file:
+    with spinner_placeholder.container():
+        try:
+            # Get API key from secrets.toml or environment variables
+            api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+            if not api_key:
+                raise ValueError(
+                    "No Gemini API Key found. Please add `GEMINI_API_KEY = \"your_key\"` to "
+                    "`.streamlit/secrets.toml` or set the GEMINI_API_KEY environment variable."
+                )
+            client = genai.Client(api_key=api_key)
+
+            # Step 1: Text extraction
+            with st.spinner("Extracting text from file..."):
+                raw_extracted = extract_text_from_file(uploaded_file)
+                st.session_state.raw_text = raw_extracted
+            
+            # Local token rate-limiting and budgeting check
+            estimated_tokens = int(len(raw_extracted.split()) * 1.3)
+            allowed, quota_msg = check_and_update_quotas("local_user_default", estimated_tokens)
+            if not allowed:
+                st.error(quota_msg)
+                st.stop()
+            
+            # Step 2: AI Cleaning with progress update
+            progress_bar = st.progress(0.0)
+            status_text = st.empty()
+            
+            def update_progress(current, total):
+                pct = float(current) / float(total)
+                progress_bar.progress(pct)
+                status_text.markdown(f"**Processing Block {current} of {total} via Gemini...**")
+
+            with st.spinner("Executing AI-powered text cleaning & optimization..."):
+                cleaned_output = run_ai_cleaning_pipeline(
+                    raw_extracted,
+                    client,
+                    target_model,
+                    progress_callback=update_progress
+                )
+                st.session_state.cleaned_text = cleaned_output
+            
+            # Clear progress indicator
+            progress_bar.empty()
+            status_text.empty()
+            
+            # Step 3: Semantic Chunking
+            with st.spinner("Executing semantic Markdown chunking..."):
+                chunks = chunk_markdown_text(cleaned_output)
+                st.session_state.chunks = chunks
+            
+            st.session_state.processed = True
+            st.toast("Document parsed, optimized, and chunked successfully!", icon="✅")
+            
+        except Exception as e:
+            st.error(f"Pipeline Execution Failed: {str(e)}")
+            st.session_state.processed = False
+
+# ----------------- DISPLAY RESULTS AND EXPORT -----------------
+if st.session_state.processed:
+    st.markdown("---")
+    
+    # Execution Metrics Summary Row
+    m_col1, m_col2, m_col3 = st.columns(3)
+    
+    total_words = len(st.session_state.cleaned_text.split())
+    total_chars = len(st.session_state.cleaned_text)
+    num_chunks = len(st.session_state.chunks)
+    
+    with m_col1:
+        st.markdown(
+            f"<div class='stat-card'><div class='stat-val'>{num_chunks}</div><div class='stat-label'>Chunks Generated</div></div>", 
+            unsafe_allow_html=True
+        )
+    with m_col2:
+        st.markdown(
+            f"<div class='stat-card'><div class='stat-val'>{total_words:,}</div><div class='stat-label'>Optimized Words</div></div>", 
+            unsafe_allow_html=True
+        )
+    with m_col3:
+        st.markdown(
+            f"<div class='stat-card'><div class='stat-val'>{total_chars:,}</div><div class='stat-label'>Total Characters</div></div>", 
+            unsafe_allow_html=True
+        )
+        
+    # Prepare Unified JSON Structure
+    export_payload = {
+        "metadata": {
+            "source": source_name,
+            "tags": custom_tags,
+            "file_name": uploaded_file.name,
+            "original_size_bytes": uploaded_file.size
+        },
+        "stats": {
+            "total_chunks": len(st.session_state.chunks),
+            "total_words": len(st.session_state.cleaned_text.split()),
+            "total_characters": len(st.session_state.cleaned_text)
+        },
+        "chunks": st.session_state.chunks
+    }
+    json_output = json.dumps(export_payload, indent=2)
+
+    # Full-width Promoted Download CTA inside styled spacing container
+    st.markdown('<div style="margin: 20px 0; padding: 8px 0;">', unsafe_allow_html=True)
+    st.download_button(
+        label="Download structured JSON",
+        data=json_output,
+        file_name=f"{source_name.lower().replace(' ', '_')}_vector_payload.json",
+        mime="application/json",
+        use_container_width=True
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Split Layout for Editing & Final JSON review
+    col_editor, col_preview = st.columns([1, 1])
+    
+    with col_editor:
+        st.subheader("📝 Preview & Edit Optimized Markdown")
+        st.markdown(
+            "<p style='color: #6b7280; font-size: 0.85rem;'>Adjust cleaned content below to perfect headers and hierarchy. Chunk segmentation updates instantly.</p>", 
+            unsafe_allow_html=True
+        )
+        
+        # Streamlit text area mapped to session state and trigger chunking on change
+        st.text_area(
+            "Cleaned Markdown Content",
+            value=st.session_state.cleaned_text,
+            height=500,
+            key="editor",
+            label_visibility="collapsed",
+            on_change=update_cleaned_content
+        )
+        
+    with col_preview:
+        st.subheader("📦 Generated Vector Ingest JSON")
+        st.markdown(
+            "<p style='color: #6b7280; font-size: 0.85rem;'>Structured JSON payload ready for Vector Store embedding ingestion.</p>", 
+            unsafe_allow_html=True
+        )
+        
+        # Encapsulated scrollable code viewport matching editor height with border
+        st.markdown('<div style="height: 500px; overflow-y: auto; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px;">', unsafe_allow_html=True)
+        st.code(json_output, language="json", line_numbers=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # Accordion detail list for chunk diagnostics
+    with st.expander("🔍 Detailed Chunk Segments Diagnostic"):
+        for idx, chk in enumerate(st.session_state.chunks):
+            st.markdown(f"**Chunk #{idx + 1}** | Section Path: `{chk['header_path']}`")
+            st.markdown(f"*Words: {chk['word_count']}*")
+            st.text(chk['content'])
+            st.markdown("---")
+</file>
+
+<file path="requirements.txt">
+streamlit>=1.30.0
+pymupdf>=1.23.0
+google-genai>=0.1.0
+pandas>=1.5.0
+python-docx>=0.8.11
+python-pptx>=0.6.21
+openpyxl>=3.1.0
+tabulate>=0.9.0
+</file>
+
+<file path="sample.md">
+# Target Audience Optimization
+
+This is the main introduction text for target audience research.
+
+## B2B SaaS Customers
+Our B2B SaaS segment needs high reliability and transparent pricing structures.
+
+### Key Pain Points
+- Implementation speed
+- Custom integrations
+</file>
+
+</files>
