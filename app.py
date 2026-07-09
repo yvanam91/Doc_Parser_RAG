@@ -253,8 +253,8 @@ st.markdown('<div class="responsive-center-container">', unsafe_allow_html=True)
 # Document uploader
 uploaded_file = st.file_uploader(
     "Upload Source Document", 
-    type=["pdf", "md", "txt", "docx", "pptx", "csv", "xlsx"], 
-    help="Upload PDF, MD, TXT, DOCX, PPTX, CSV, or XLSX source file to initialize ingest sequence."
+    type=["pdf", "md", "txt", "docx", "pptx", "csv", "xlsx", "html", "htm"], 
+    help="Upload PDF, MD, TXT, DOCX, PPTX, CSV, XLSX, HTML, or HTM source file to initialize ingest sequence."
 )
 
 # Handle file change and reset state appropriately

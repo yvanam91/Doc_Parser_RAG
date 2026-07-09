@@ -4,7 +4,7 @@ import fitz  # PyMuPDF
 def extract_text_from_file(file) -> str:
     """
     Extracts raw text from an uploaded file based on its extension.
-    Supports PDF, MD, TXT, DOCX, PPTX, CSV, and XLSX.
+    Supports PDF, MD, TXT, DOCX, PPTX, CSV, XLSX, HTML, and HTM.
     
     Args:
         file: A file-like object from st.file_uploader.
@@ -92,8 +92,34 @@ def extract_text_from_file(file) -> str:
             return truncated_df.to_markdown(index=False)
         except Exception as e:
             raise Exception(f"Failed to parse Excel Spreadsheet (.xlsx): {str(e)}")
+
+    elif ext in [".html", ".htm"]:
+        try:
+            from bs4 import BeautifulSoup
+            content = file.read()
+            if isinstance(content, bytes):
+                html_content = content.decode("utf-8")
+            else:
+                html_content = content
+            
+            soup = BeautifulSoup(html_content, "html.parser")
+            
+            # Decompose boilerplate and interactive elements in place
+            noise_elements = ['header', 'footer', 'nav', 'aside', 'script', 'style', 'form', 'button', 'iframe', 'noscript']
+            for tag in noise_elements:
+                for element in soup.find_all(tag):
+                    element.decompose()
+            
+            # Extract clean text separator mapping
+            extracted_text = soup.get_text(separator="\n")
+            
+            # Sanitize extreme padding and repetitive empty lines
+            lines = [line.strip() for line in extracted_text.splitlines() if line.strip()]
+            return "\n".join(lines)
+        except Exception as e:
+            raise Exception(f"Failed to parse HTML document: {str(e)}")
             
     else:
         raise ValueError(
-            f"Unsupported file type '{ext}'. Supported extensions: .pdf, .md, .txt, .docx, .pptx, .csv, .xlsx"
+            f"Unsupported file type '{ext}'. Supported extensions: .pdf, .md, .txt, .docx, .pptx, .csv, .xlsx, .html, .htm"
         )
