@@ -5,3 +5,5 @@ __pycache__/
 data/rate_limits.json
 .DS_Store
 repomix-output.xml
+repomix-output.txt
+repomix.config.json

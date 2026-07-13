@@ -13,7 +13,7 @@ class CleanedTopic(BaseModel):
 class DocumentCleanPayload(BaseModel):
     topics: List[CleanedTopic]
 
-def split_raw_text_into_large_blocks(text: str, block_size: int = 25000, overlap: int = 2500) -> List[str]:
+def split_raw_text_into_large_blocks(text: str, block_size: int = 100000, overlap: int = 1000) -> List[str]:
     """
     Splits raw text into overlapping segments to prevent LLM context and output window saturation.
     
@@ -48,7 +48,22 @@ def split_raw_text_into_large_blocks(text: str, block_size: int = 25000, overlap
             
     return blocks
 
-def call_llm_cleaner_api(text_block: str, client, model_name: str) -> str:
+SYSTEM_INSTRUCTION = (
+    "You are an expert Knowledge Engineer.\n"
+    "Your task is to clean and optimize raw text extracted from documents for ingestion into a RAG system.\n\n"
+    "Please process the input text according to these strict rules:\n"
+    "1. Identify the logical topics in the text block.\n"
+    "2. For each topic, extract a descriptive title and determine its hierarchy_path (e.g. 'Main Section > Sub Section').\n"
+    "3. Remove all conversational filler, chatty preambles, introductory welcoming text, repetitive examples, "
+    "licensing boilerplate, page headers, footers, and meta-commentary.\n"
+    "4. Retain 100% of the raw, granular conceptual rules, specifications, laws, formulas, criteria, definitions, "
+    "and precise technical details.\n"
+    "5. STOP CONDITION: If the text segment consists of a literal keyword index, subject index, glossary list, or bibliography, output nothing or skip the processing of this block entirely. Do not format indices into markdown chunks.\n"
+    "6. Output clean, raw content inside sanitized_content. Do not summarize or lose critical information. "
+    "Do not create high-level summary blocks or meta-recaps (e.g., 'Overview' or 'General Best Practices') if the specific technical details and sub-sections are already detailed downstream in the text. Prioritize splitting the document into atomic, standalone concepts."
+)
+
+def call_llm_cleaner_api(text_block: str, client, model_name: str, cached_content_name: Optional[str] = None) -> str:
     """
     Executes a content generation request to the Gemini API to clean document noise,
     forcing structured JSON schema execution.
@@ -57,35 +72,31 @@ def call_llm_cleaner_api(text_block: str, client, model_name: str) -> str:
         text_block: Raw chunk of text.
         client: google.genai.Client instance.
         model_name: Name of target model.
+        cached_content_name: Optional name of the cached compilation cache.
         
     Returns:
         str: Cleaned Markdown content reconstructed from structured JSON.
     """
-    system_instruction = (
-        "You are an expert Knowledge Engineer.\n"
-        "Your task is to clean and optimize raw text extracted from documents for ingestion into a RAG system.\n\n"
-        "Please process the input text according to these strict rules:\n"
-        "1. Identify the logical topics in the text block.\n"
-        "2. For each topic, extract a descriptive title and determine its hierarchy_path (e.g. 'Main Section > Sub Section').\n"
-        "3. Remove all conversational filler, chatty preambles, introductory welcoming text, repetitive examples, "
-        "licensing boilerplate, page headers, footers, and meta-commentary.\n"
-        "4. Retain 100% of the raw, granular conceptual rules, specifications, laws, formulas, criteria, definitions, "
-        "and precise technical details.\n"
-        "5. STOP CONDITION: If the text segment consists of a literal keyword index, subject index, glossary list, or bibliography, output nothing or skip the processing of this block entirely. Do not format indices into markdown chunks.\n"
-        "6. Output clean, raw content inside sanitized_content. Do not summarize or lose critical information. "
-        "Do not create high-level summary blocks or meta-recaps (e.g., 'Overview' or 'General Best Practices') if the specific technical details and sub-sections are already detailed downstream in the text. Prioritize splitting the document into atomic, standalone concepts."
-    )
-    
     try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=text_block,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
+        if cached_content_name:
+            config = types.GenerateContentConfig(
+                cached_content=cached_content_name,
                 temperature=0.1,
                 response_mime_type="application/json",
                 response_schema=DocumentCleanPayload
             )
+        else:
+            config = types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                temperature=0.1,
+                response_mime_type="application/json",
+                response_schema=DocumentCleanPayload
+            )
+            
+        response = client.models.generate_content(
+            model=model_name,
+            contents=text_block,
+            config=config
         )
         if not response.text:
             raise ValueError("Gemini API returned an empty response.")
@@ -140,13 +151,29 @@ def run_ai_cleaning_pipeline(
     if total_blocks == 0:
         return ""
         
+    cached_content_name = None
+    if total_blocks > 3:
+        try:
+            # Create a temporary compilation cache for the massive system instructions
+            cache = client.caches.create(
+                model=model_name,
+                config=types.CreateCachedContentConfig(
+                    contents=[types.Content(role="user", parts=[types.Part.from_text(text=SYSTEM_INSTRUCTION)])],
+                    ttl="300s" # Cache available for 5 minutes
+                )
+            )
+            cached_content_name = cache.name
+        except Exception as cache_err:
+            # Fall back to standard non-cached calls if caching fails
+            cached_content_name = None
+            
     results_map = {}
     completed_count = 0
     
     # Run requests concurrently using ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=10) as executor:
         future_to_index = {
-            executor.submit(call_llm_cleaner_api, block, client, model_name): idx 
+            executor.submit(call_llm_cleaner_api, block, client, model_name, cached_content_name): idx 
             for idx, block in enumerate(blocks)
         }
         
